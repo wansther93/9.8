@@ -640,8 +640,8 @@ export const ScheduleDetailModal: React.FC<ScheduleDetailModalProps> = ({
                   )}
                   {anime.nextEpisode?.airingAt ? (
                     <div className="flex items-center gap-1.5 px-2 py-0.5 rounded bg-black/50 border border-amber-500/30 text-amber-300 font-medium text-[11px]">
-                      <Clock className="w-3 h-3 text-amber-400" />
-                      <span>Ep. {anime.nextEpisode.episode || 1} ({formatCountdown(anime.nextEpisode.airingAt)})</span>
+                      <Calendar className="w-3 h-3 text-amber-400" />
+                      <span>{displayUpcomingDate || formatReleaseDate()} • Ep. {anime.nextEpisode.episode || 1} ({formatCountdown(anime.nextEpisode.airingAt)})</span>
                     </div>
                   ) : (
                     <div className="flex items-center gap-1.5 px-2 py-0.5 rounded bg-black/50 border border-amber-500/20 text-amber-200 font-medium text-[11px]">

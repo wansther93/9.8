@@ -58,8 +58,19 @@ export function formatUpcomingReleaseForecast(
   let startMonth = startDate?.month;
   let startDay = startDate?.day;
 
-  // Se a API disponibilizar timestamp do episódio 1 e startDate não tiver o dia completo
-  if ((!startYear || !startMonth || !startDay) && airingAtSeconds && airingAtSeconds > 0) {
+  const nowMs = Date.now();
+  // Se a data de início registrada for do passado (ex: lançamento original de animes contínuos como One Piece de 1999)
+  const isStartDateInPast = Boolean(
+    startYear &&
+    (startYear < new Date().getFullYear() ||
+      (startMonth && new Date(startYear, startMonth - 1, startDay || 1).getTime() < nowMs))
+  );
+
+  // Se a API disponibilizar timestamp de episódio futuro agendado (airingAtSeconds futuro):
+  // Ou se a data de início for do passado, ou se startDate não tiver dia completo:
+  const isAiringAtFuture = Boolean(airingAtSeconds && airingAtSeconds * 1000 > nowMs);
+
+  if (airingAtSeconds && airingAtSeconds > 0 && (isAiringAtFuture || isStartDateInPast || !startYear || !startMonth || !startDay)) {
     try {
       const airingDate = new Date(airingAtSeconds * 1000);
       const parts = new Intl.DateTimeFormat('pt-BR', {

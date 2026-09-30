@@ -41,7 +41,6 @@ import {
   formatUpcomingReleaseForecast,
   isFinalEpisodeOfSeason,
   hasAnimeConcludedSeason,
-  detectAnimePartInfo,
   getFinalEpisodeLabels,
   getUpcomingReleaseTimestamp,
 } from '../services/scheduleLifecycleService';
@@ -97,10 +96,6 @@ const ScheduleAnimeCard = React.memo<ScheduleAnimeCardProps>(({
     return isFinalEpisodeOfSeason(item);
   }, [item]);
 
-  const partInfo = useMemo(() => {
-    return detectAnimePartInfo(item.title, item.title_english);
-  }, [item.title, item.title_english]);
-
   const finalEpLabels = useMemo(() => {
     return getFinalEpisodeLabels(item);
   }, [item]);
@@ -136,7 +131,7 @@ const ScheduleAnimeCard = React.memo<ScheduleAnimeCardProps>(({
 
         {/* Barra superior de tags do pôster: Perfeitamente alinhadas na mesma linha horizontal */}
         <div className="absolute top-2.5 inset-x-2.5 z-10 flex items-center justify-between gap-1 pointer-events-none">
-          {/* Lado Esquerdo: Selo de Streaming e/ou Tag Continuação */}
+          {/* Lado Esquerdo: Selo de Streaming Oficial no Brasil */}
           <div className="flex items-center gap-1 min-w-0">
             {streamingBadge && (
               <span
@@ -144,11 +139,6 @@ const ScheduleAnimeCard = React.memo<ScheduleAnimeCardProps>(({
               >
                 <span className={`w-1.5 h-1.5 rounded-full ${streamingBadge.dotColor} animate-pulse`} />
                 <span>{streamingBadge.name}</span>
-              </span>
-            )}
-            {partInfo.isSplitCourOrPart && (
-              <span className="inline-flex items-center px-1.5 rounded-md text-[8.5px] font-black tracking-wider uppercase bg-indigo-600/95 text-white shadow-md border border-indigo-400/40 h-5 whitespace-nowrap">
-                Continuação
               </span>
             )}
           </div>

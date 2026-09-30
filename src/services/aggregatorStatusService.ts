@@ -101,7 +101,17 @@ export function formatUpcomingReleaseDate(node?: {
   const season = node.season ? SEASON_MAP_PT[node.season.toUpperCase()] : null;
 
   const airingAt = node.nextAiringEpisode?.airingAt || node.nextEpisode?.airingAt;
-  if ((!day || !month || !year) && airingAt && airingAt > 0) {
+
+  const nowMs = Date.now();
+  const isStartDateInPast = Boolean(
+    year &&
+    (year < new Date().getFullYear() ||
+      (month && new Date(year, month - 1, day || 1).getTime() < nowMs))
+  );
+
+  const isAiringAtFuture = Boolean(airingAt && airingAt * 1000 > nowMs);
+
+  if (airingAt && airingAt > 0 && (isAiringAtFuture || isStartDateInPast || !day || !month || !year)) {
     try {
       const airingDate = new Date(airingAt * 1000);
       const parts = new Intl.DateTimeFormat('pt-BR', {
