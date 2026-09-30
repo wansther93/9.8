@@ -453,7 +453,19 @@ export function reconcileScheduleLifecycle(
   const hasFutureScheduledEpisode = (item: ScheduleAnimeItem): boolean => {
     if (item.nextEpisode?.airingAt) {
       const nowSec = Math.floor(Date.now() / 1000);
-      return item.nextEpisode.airingAt > nowSec;
+      if (item.nextEpisode.airingAt > nowSec) return true;
+    }
+    if (typeof item.nextEpisode?.timeUntilAiring === 'number' && item.nextEpisode.timeUntilAiring > 0) {
+      return true;
+    }
+    // Obras contínuas ou de temporadas ativas que entraram em hiato semanal
+    const statusLower = (item.status || '').toLowerCase();
+    const isOngoingOrReleasing =
+      statusLower.includes('releasing') ||
+      statusLower.includes('currently airing') ||
+      statusLower === 'ongoing';
+    if (isOngoingOrReleasing && isAnimeInWeeklyHiatus(item)) {
+      return true;
     }
     if (item.startDate?.year) {
       const now = new Date();

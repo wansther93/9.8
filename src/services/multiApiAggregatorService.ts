@@ -14,6 +14,10 @@ import {
   normalizeBrazilStreaming,
   purgeLegacyScheduleCaches,
   getCachedSeasonNow,
+  getCachedSeasonUpcoming,
+  getCachedWeeklySchedule,
+  setUnifiedSeasonCache,
+  setUnifiedScheduleCache,
 } from './jikanService';
 import {
   fetchShikimoriSchedule,
@@ -39,7 +43,8 @@ const multiCharCache = new Map<string, { data: AnimeCharacterItem[]; timestamp: 
 const multiStreamCache = new Map<string, { data: AnimeStreamingLink[]; timestamp: number }>();
 
 const CACHE_TTL = 30 * 60 * 1000; // 30 minutos
-const BG_SYNC_INTERVAL = 30 * 1000; // 30 segundos (não bloqueia novidades)
+const BG_SYNC_INTERVAL = 30 * 1000; // 30 segundos
+const MANUAL_SYNC_COOLDOWN = 35 * 1000; // 35 segundos para proteger cota de 90 req/min da AniList
 
 /**
  * 1. Calendário Semanal Agregado (AniList -> Jikan -> Shikimori)
@@ -81,6 +86,7 @@ export async function getAggregatedWeeklySchedule(dayPt?: string, force = false)
 
   if (activeItems.length > 0) {
     multiScheduleCache.set(cacheKey, { data: activeItems, timestamp: Date.now() });
+    setUnifiedScheduleCache(cacheKey, activeItems);
   }
   return activeItems;
 }
@@ -90,8 +96,12 @@ export async function getAggregatedWeeklySchedule(dayPt?: string, force = false)
  * - Puxa até 250 obras futuras confirmadas (TV, Movie, ONA, OVA).
  * - Identifica animes contínuos em hiato (>14 dias) que possuem episódio futuro agendado (ex: One Piece 95 dias) e mescla automaticamente.
  * - Animes finalizados ou em hiato sem previsão futura (ex: Hunter x Hunter) não são incluídos.
+ * - Proteção Anti-Degradação: NUNCA substitui catálogo saudável por lista parcial se houver throttling.
  */
-export async function getAggregatedUpcomingAnimes(force = false): Promise<ScheduleAnimeItem[]> {
+export async function getAggregatedUpcomingAnimes(
+  force = false,
+  preloadedSeasonNow?: ScheduleAnimeItem[]
+): Promise<ScheduleAnimeItem[]> {
   const cacheKey = 'upcoming_all';
   if (!force) {
     const cached = multiUpcomingCache.get(cacheKey);
@@ -119,19 +129,32 @@ export async function getAggregatedUpcomingAnimes(force = false): Promise<Schedu
     }
   }
 
+  // PROTEÇÃO ANTI-DEGRADAÇÃO:
+  // Se a consulta de rede falhou ou retornou pouquíssimos itens (< 15) por limite de cota,
+  // preserva o catálogo saudável prévio em vez de esvaziar a tela do usuário
+  const previousHealthy = getCachedSeasonUpcoming() || multiUpcomingCache.get(cacheKey)?.data || [];
+  if (items.length < 15 && previousHealthy.length > 50) {
+    console.warn(`[Anti-Degradação] Consulta retornou ${items.length} itens. Preservando catálogo confiável de ${previousHealthy.length} itens.`);
+    items = [...previousHealthy];
+  }
+
   // Mescla animes contínuos ativos que entraram em hiato (>14 dias), mas que possuem retorno/episódio futuro confirmado (ex: One Piece)
   try {
-    let seasonNowRaw = await fetchJikanOrAniListSeasonNow(force).catch(() => []);
+    let seasonNowRaw = preloadedSeasonNow;
     if (!seasonNowRaw || seasonNowRaw.length === 0) {
-      seasonNowRaw = getCachedSeasonNow() || [];
+      seasonNowRaw = await fetchJikanOrAniListSeasonNow(force).catch(() => []);
+    }
+    if (!seasonNowRaw || seasonNowRaw.length === 0) {
+      seasonNowRaw = getCachedSeasonNow() || multiSeasonNowCache.get('season_now_all')?.data || [];
     }
     const nowSec = Math.floor(Date.now() / 1000);
     const existingIds = new Set(items.map((i) => i.id));
 
-    const hiatusWithFutureEpisodes = seasonNowRaw.filter((item) => {
+    const hiatusWithFutureEpisodes = (seasonNowRaw || []).filter((item) => {
       if (!isAnimeInWeeklyHiatus(item)) return false;
       // Validação estrita: somente obras que possuem próximo episódio agendado com timestamp futuro
       if (item.nextEpisode?.airingAt && item.nextEpisode.airingAt > nowSec) return true;
+      if (typeof item.nextEpisode?.timeUntilAiring === 'number' && item.nextEpisode.timeUntilAiring > 0) return true;
       if (item.startDate?.year && item.startDate.year >= new Date().getFullYear()) return true;
       return false;
     });
@@ -152,6 +175,7 @@ export async function getAggregatedUpcomingAnimes(force = false): Promise<Schedu
 
   if (items.length > 0) {
     multiUpcomingCache.set(cacheKey, { data: items, timestamp: Date.now() });
+    setUnifiedSeasonCache('season_upcoming', items);
   }
   return items;
 }
@@ -191,6 +215,7 @@ export async function getAggregatedSeasonNowAnimes(force = false): Promise<Sched
 
   if (activeItems.length > 0) {
     multiSeasonNowCache.set(cacheKey, { data: activeItems, timestamp: Date.now() });
+    setUnifiedSeasonCache('season_now', activeItems);
   }
   return activeItems;
 }
@@ -228,6 +253,7 @@ let isBgSyncRunning = false;
 
 export interface BackgroundSyncResult {
   success: boolean;
+  isThrottled?: boolean;
   newAnimesCount: number;
   totalAnimesCount: number;
   activeWeekly: ScheduleAnimeItem[];
@@ -242,8 +268,8 @@ export interface BackgroundSyncResult {
  * - Migra animes que estrearam para a grade de Em Exibição na semana e horário brasileiro.
  * - Remove do calendário semanal animes que concluíram sua temporada ou entraram em hiato (>14 dias).
  * - Transfere animes em hiato (como One Piece 96 dias) para Próxima Temporada.
- * - Detecta quantos animes novos entraram na agenda.
- * - Salva nos armazenamentos locais persistentes v6 para abertura imediata (0ms) na aba de Agenda.
+ * - Proteção Anti-Degradação: NUNCA aceita sobrescrever uma lista completa por uma lista parcial ou vazia de erro 429.
+ * - Cooldown inteligente de 35s contra múltiplos cliques rápidos em sequência.
  */
 export async function runBackgroundScheduleSync(force = false, userAnimes: Anime[] = []): Promise<BackgroundSyncResult> {
   if (typeof window === 'undefined') {
@@ -253,16 +279,32 @@ export async function runBackgroundScheduleSync(force = false, userAnimes: Anime
   // Limpa caches obsoletos de versões antigas do app
   purgeLegacyScheduleCaches();
 
-  if (isBgSyncRunning && !force) {
+  if (isBgSyncRunning) {
     return { success: false, newAnimesCount: 0, totalAnimesCount: 0, activeWeekly: [], activeSeasonNow: [], cleanUpcoming: [] };
   }
 
   const lastSync = Number(localStorage.getItem(SCHEDULE_BACKGROUND_SYNC_TS) || '0');
   const now = Date.now();
 
-  // Evita requisições repetidas se já foi sincronizado recentemente, exceto se forçado pelo usuário
-  if (!force && now - lastSync < BG_SYNC_INTERVAL) {
-    return { success: true, newAnimesCount: 0, totalAnimesCount: 0, activeWeekly: [], activeSeasonNow: [], cleanUpcoming: [] };
+  // Cooldown inteligente para proteger a cota da API (AniList 90 req/min):
+  // Se uma sincronização completa com a rede já ocorreu há menos de 35 segundos,
+  // evita disparar outra onda de requisições que causaria erro HTTP 429
+  if (now - lastSync < MANUAL_SYNC_COOLDOWN) {
+    const activeWeekly = multiScheduleCache.get('all')?.data || getCachedWeeklySchedule('all') || [];
+    const activeSeasonNow = multiSeasonNowCache.get('season_now_all')?.data || getCachedSeasonNow() || [];
+    const cleanUpcoming = multiUpcomingCache.get('upcoming_all')?.data || getCachedSeasonUpcoming() || [];
+
+    if (activeWeekly.length > 0 || activeSeasonNow.length > 0 || cleanUpcoming.length > 0) {
+      return {
+        success: true,
+        isThrottled: true,
+        newAnimesCount: 0,
+        totalAnimesCount: activeWeekly.length + activeSeasonNow.length + cleanUpcoming.length,
+        activeWeekly,
+        activeSeasonNow,
+        cleanUpcoming,
+      };
+    }
   }
 
   isBgSyncRunning = true;
@@ -279,60 +321,67 @@ export async function runBackgroundScheduleSync(force = false, userAnimes: Anime
       }
     } catch {}
 
-    // 1. Busca calendário semanal, temporada atual e próximas estreias via cascata multi-API
-    const [weeklyRaw, upcomingRaw, seasonNowRaw] = await Promise.all([
+    // 1. Busca calendário semanal e animes em transmissão (passando a lista completa para identificação de hiatos pelo Juiz)
+    let rawSeasonNow: ScheduleAnimeItem[] = [];
+    try {
+      rawSeasonNow = await fetchJikanOrAniListSeasonNow(force);
+    } catch {
+      rawSeasonNow = getCachedSeasonNow() || [];
+    }
+
+    const [weeklyRaw, upcomingRaw] = await Promise.all([
       getAggregatedWeeklySchedule(undefined, force).catch(() => []),
-      getAggregatedUpcomingAnimes(force).catch(() => []),
-      getAggregatedSeasonNowAnimes(force).catch(() => []),
+      getAggregatedUpcomingAnimes(force, rawSeasonNow).catch(() => []),
     ]);
 
     // 2. Reconciliação estrita do ciclo de vida: promove estreias, transfere hiatos e remove finalizados
     const { activeWeekly, activeSeasonNow, cleanUpcoming } = reconcileScheduleLifecycle(
       weeklyRaw,
       upcomingRaw,
-      seasonNowRaw,
+      rawSeasonNow,
       userAnimes
     );
 
-    // 3. Atualiza cache em memória e persistente local (FONTE ÚNICA DA VERDADE - JUIZ ÚNICO)
-    if (activeWeekly.length > 0) {
-      multiScheduleCache.set('all', { data: activeWeekly, timestamp: now });
-      try {
-        localStorage.setItem(`${LOCAL_SCHEDULE_KEY_PREFIX}all`, JSON.stringify({ data: activeWeekly, timestamp: now }));
-        localStorage.setItem(`${LOCAL_SCHEDULE_KEY_PREFIX}all_ts`, String(now));
-
-        // Particiona a grade reconciliada por dia da semana para resposta imediata de 0ms
-        const weekdays = ['Segunda', 'Terça', 'Quarta', 'Quinta', 'Sexta', 'Sábado', 'Domingo'];
-        for (const wDay of weekdays) {
-          const dayItems = activeWeekly.filter(
-            (item) => item.broadcastDay === wDay || item.broadcastDay?.startsWith(wDay)
-          );
-          if (dayItems.length > 0) {
-            localStorage.setItem(`${LOCAL_SCHEDULE_KEY_PREFIX}${wDay}`, JSON.stringify({ data: dayItems, timestamp: now }));
-            localStorage.setItem(`${LOCAL_SCHEDULE_KEY_PREFIX}${wDay}_ts`, String(now));
-          }
-        }
-      } catch {}
+    // 4. Proteção Anti-Degradação do Juiz no salvamento da Próxima Temporada
+    const previousUpcoming = getCachedSeasonUpcoming() || multiUpcomingCache.get('upcoming_all')?.data || [];
+    let finalUpcoming = cleanUpcoming;
+    if (finalUpcoming.length < 15 && previousUpcoming.length > 50) {
+      console.warn(`[Juiz] Protegendo cache contra degradação: preservando ${previousUpcoming.length} animes futuros.`);
+      const mergedMap = new Map<number, ScheduleAnimeItem>();
+      previousUpcoming.forEach((item) => mergedMap.set(item.id, item));
+      finalUpcoming.forEach((item) => mergedMap.set(item.id, item));
+      finalUpcoming = Array.from(mergedMap.values());
     }
 
-    if (cleanUpcoming.length > 0) {
-      multiUpcomingCache.set('upcoming_all', { data: cleanUpcoming, timestamp: now });
-      try {
-        localStorage.setItem(LOCAL_SEASON_UPCOMING_KEY, JSON.stringify({ data: cleanUpcoming, timestamp: now }));
-        localStorage.setItem(`${LOCAL_SEASON_UPCOMING_KEY}_ts`, String(now));
-      } catch {}
+    // 5. Atualiza cache em memória e persistente local (FONTE ÚNICA DA VERDADE - JUIZ ÚNICO)
+    if (activeWeekly.length > 0) {
+      multiScheduleCache.set('all', { data: activeWeekly, timestamp: now });
+      setUnifiedScheduleCache('all', activeWeekly);
+
+      // Particiona a grade reconciliada por dia da semana para resposta imediata de 0ms
+      const weekdays = ['Segunda', 'Terça', 'Quarta', 'Quinta', 'Sexta', 'Sábado', 'Domingo'];
+      for (const wDay of weekdays) {
+        const dayItems = activeWeekly.filter(
+          (item) => item.broadcastDay === wDay || item.broadcastDay?.startsWith(wDay)
+        );
+        if (dayItems.length > 0) {
+          setUnifiedScheduleCache(wDay, dayItems);
+        }
+      }
+    }
+
+    if (finalUpcoming.length > 0) {
+      multiUpcomingCache.set('upcoming_all', { data: finalUpcoming, timestamp: now });
+      setUnifiedSeasonCache('season_upcoming', finalUpcoming);
     }
 
     if (activeSeasonNow.length > 0) {
       multiSeasonNowCache.set('season_now_all', { data: activeSeasonNow, timestamp: now });
-      try {
-        localStorage.setItem(LOCAL_SEASON_NOW_KEY, JSON.stringify({ data: activeSeasonNow, timestamp: now }));
-        localStorage.setItem(`${LOCAL_SEASON_NOW_KEY}_ts`, String(now));
-      } catch {}
+      setUnifiedSeasonCache('season_now', activeSeasonNow);
     }
 
     // Calcula novos animes encontrados
-    const allCombined = [...activeWeekly, ...activeSeasonNow, ...cleanUpcoming];
+    const allCombined = [...activeWeekly, ...activeSeasonNow, ...finalUpcoming];
     const currentIds = new Set<number>(allCombined.map((item) => item.id));
     let newAnimesCount = 0;
 
@@ -352,17 +401,17 @@ export async function runBackgroundScheduleSync(force = false, userAnimes: Anime
     // Grava timestamp da última sincronização bem-sucedida
     localStorage.setItem(SCHEDULE_BACKGROUND_SYNC_TS, String(now));
 
-    // 4. Notifica componentes da aplicação sobre dados frescos com arrays reconciliados
+    // 6. Notifica componentes da aplicação sobre dados frescos com arrays reconciliados
     try {
       window.dispatchEvent(
         new CustomEvent(SCHEDULE_UPDATED_EVENT, {
           detail: {
             weeklyCount: activeWeekly.length,
-            upcomingCount: cleanUpcoming.length,
+            upcomingCount: finalUpcoming.length,
             seasonNowCount: activeSeasonNow.length,
             activeWeekly,
             activeSeasonNow,
-            cleanUpcoming,
+            cleanUpcoming: finalUpcoming,
             newAnimesCount,
             isManual: force,
             timestamp: now,
@@ -377,7 +426,7 @@ export async function runBackgroundScheduleSync(force = false, userAnimes: Anime
       totalAnimesCount: allCombined.length,
       activeWeekly,
       activeSeasonNow,
-      cleanUpcoming,
+      cleanUpcoming: finalUpcoming,
     };
   } catch (err) {
     console.warn('Sincronização da Agenda falhou:', err);

@@ -573,6 +573,29 @@ export function isSfwAnime(item: any): boolean {
   return true;
 }
 
+export function setUnifiedSeasonCache(key: 'season_now' | 'season_upcoming', items: ScheduleAnimeItem[]) {
+  if (!items || items.length === 0) return;
+  seasonCache.set(key, { data: items, timestamp: Date.now() });
+  if (typeof window !== 'undefined') {
+    try {
+      const storageKey = key === 'season_now' ? LOCAL_SEASON_NOW_KEY : LOCAL_SEASON_UPCOMING_KEY;
+      localStorage.setItem(storageKey, JSON.stringify({ data: items, timestamp: Date.now() }));
+      localStorage.setItem(`${storageKey}_ts`, String(Date.now()));
+    } catch {}
+  }
+}
+
+export function setUnifiedScheduleCache(dayOrKey: string, items: ScheduleAnimeItem[]) {
+  if (!items || items.length === 0) return;
+  scheduleCache.set(dayOrKey, { data: items, timestamp: Date.now() });
+  if (typeof window !== 'undefined') {
+    try {
+      localStorage.setItem(`${LOCAL_SCHEDULE_KEY_PREFIX}${dayOrKey}`, JSON.stringify({ data: items, timestamp: Date.now() }));
+      localStorage.setItem(`${LOCAL_SCHEDULE_KEY_PREFIX}${dayOrKey}_ts`, String(Date.now()));
+    } catch {}
+  }
+}
+
 export function getCachedSeasonNow(): ScheduleAnimeItem[] | null {
   const mem = seasonCache.get('season_now');
   if (mem && mem.data.length > 0) return mem.data;
@@ -1213,6 +1236,10 @@ export const getSeasonNowAnimes = async (force: boolean = false): Promise<Schedu
     console.warn('Erro ao buscar season now do Jikan:', err);
   }
 
+  const fallbackNow = getCachedSeasonNow();
+  if (fallbackNow && fallbackNow.length > 0) {
+    return fallbackNow;
+  }
   return [];
 };
 
@@ -1459,6 +1486,10 @@ export const getSeasonUpcomingAnimes = async (force: boolean = false): Promise<S
     console.warn('Erro ao buscar season upcoming do Jikan:', err);
   }
 
+  const fallbackUpcoming = getCachedSeasonUpcoming();
+  if (fallbackUpcoming && fallbackUpcoming.length > 0) {
+    return fallbackUpcoming;
+  }
   return [];
 };
 

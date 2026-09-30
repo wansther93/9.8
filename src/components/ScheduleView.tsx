@@ -474,7 +474,12 @@ export const ScheduleView: React.FC<ScheduleViewProps> = ({
         if (filtered.length > 0) setScheduleList(filtered);
       }
 
-      if (syncResult.newAnimesCount > 0) {
+      if (syncResult.isThrottled) {
+        setSyncNotice({
+          message: 'Agenda já está 100% atualizada com a versão oficial mais recente!',
+          type: 'info',
+        });
+      } else if (syncResult.newAnimesCount > 0) {
         setSyncNotice({
           message: `${syncResult.newAnimesCount} ${syncResult.newAnimesCount === 1 ? 'novo anime adicionado' : 'novos animes adicionados'} à Agenda!`,
           type: 'new',
